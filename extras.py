@@ -25,15 +25,15 @@ def n_gd(nombre):
 
 
 def pipeline(root):
-    """Etapas = subcarpetas de 01 Pipeline; además Standby y Descartados de 02 Archivo."""
+    """Etapas = subcarpetas de 01 Pipeline (E1..E4); además Descartados de 02 Archivo.
+    Standby no se usa: todo proyecto está en una etapa del pipeline o descartado."""
     out = []
     if not os.path.isdir(root):
         return {"error": f"No se encontró la carpeta {root}", "etapas": []}
     etapas = [(d, os.path.join(root, d)) for d in sorted(os.listdir(root)) if os.path.isdir(os.path.join(root, d))]
-    archivo = os.path.join(os.path.dirname(root), "02 Archivo")
-    for d in ("Standby", "Descartados"):
-        if os.path.isdir(os.path.join(archivo, d)):
-            etapas.append((d, os.path.join(archivo, d)))
+    archivo = os.path.join(os.path.dirname(root), "02 Archivo", "Descartados")
+    if os.path.isdir(archivo):
+        etapas.append(("Descartados", archivo))
     for nombre, ruta in etapas:
         proys = []
         for d in sorted(os.listdir(ruta)):

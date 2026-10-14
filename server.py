@@ -19,6 +19,8 @@ from http.cookies import SimpleCookie
 from urllib.parse import parse_qs, quote, urlparse
 
 import auth
+import claude_runner
+import tickets
 import extras
 import seed
 import sync
@@ -140,11 +142,38 @@ def connect():
     return con
 
 
+def fin_ejecucion_claude(tid, codigo, cambio_backend, log):
+    """Al terminar una ejecución de Claude: deja constancia en el tiquet y recarga el servidor si cambió código Python."""
+    try:
+        with _lock, connect() as con:
+            t = tickets.uno(con, tid)
+            ok = codigo == 0
+            registro = claude_runner.leer_log(tid, 4000)
+            if not ok and re.search(r"authenticate|OAuth|not logged in|/login", registro, re.I):
+                txt = ("Claude no pudo empezar: la línea de comandos de Claude Code no tiene sesión iniciada en el PC del servidor. "
+                       "Solución: abre CMD, escribe «claude», inicia sesión en el navegador y escribe /exit. Luego pulsa de nuevo «Ejecutar con Claude».")
+            else:
+                txt = (f"Ejecución de Claude terminada ({'correcta' if ok else 'con error: ' + str(codigo)}). "
+                       + ("El tiquet quedó en «" + t["estado"] + "»." if t["estado"] != "En desarrollo"
+                          else "Claude no cerró el tiquet: revisa el registro de la ejecución y sus comentarios.")
+                       + (" El servidor se reinicia para cargar los cambios." if cambio_backend else ""))
+            if t["estado"] == "En desarrollo":
+                # Claude no lo dejó listo (error o pregunta pendiente): vuelve a la cola para reintentar o responder
+                con.execute("UPDATE tickets SET estado='Aceptado', actualizado=? WHERE id=?", (tickets.ahora(), tid))
+                txt += " El tiquet volvió a «Aceptado»."
+            tickets.nota(con, tid, "Plataforma", txt)
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"No se pudo registrar el fin de la ejecución: {e}" + chr(10))
+    if cambio_backend:
+        claude_runner.reiniciar_servidor()
+
+
 def init_db():
     os.makedirs(DATA_DIR, exist_ok=True)
     with connect() as con:
         con.executescript(SCHEMA)
         auth.init(con)
+        tickets.init(con)
         # migraciones: columnas nuevas para la sincronizacion con SharePoint
         for table, col in (("proyectos", "carpeta TEXT"), ("proyectos", "sp_ref TEXT"), ("eventos", "fuente TEXT"),
                            ("catalogo", "area TEXT"), ("catalogo", "clase TEXT DEFAULT 'consulta'"),
@@ -234,6 +263,10 @@ def init_db():
             # vigencia de las licencias urbanísticas: 24 meses (Decreto 1077 de 2015, prorrogables)
             con.execute("UPDATE catalogo SET vigencia_meses=24 WHERE codigo IN ('MUN-LIC-CER','MUN-LIC-BAS') AND vigencia_meses IS NULL")
             con.execute("INSERT OR REPLACE INTO config (clave, valor) VALUES ('mig_v4', '1')")
+        if not con.execute("SELECT 1 FROM config WHERE clave='mig_v6'").fetchone():
+            # vigencia de los insumos del operador de red: 5 meses desde la respuesta (CREG 174 de 2021)
+            con.execute("UPDATE catalogo SET vigencia_meses=5 WHERE codigo='OR-DISP' AND vigencia_meses IS NULL")
+            con.execute("INSERT OR REPLACE INTO config (clave, valor) VALUES ('mig_v6', '1')")
 
 
 def rows(con, table):
@@ -371,10 +404,14 @@ class Handler(SimpleHTTPRequestHandler):
                     self.usuario = auth.usuario_de(con, self.token())
                 if not self.usuario:
                     return self.send_json({"error": "Debes iniciar sesión", "login": True}, 401)
-                if method != "GET" and self.usuario["rol"] == "lector" and p[1:2] not in (["usuarios"], ["abrir"]):
+                if method != "GET" and self.usuario["rol"] == "lector" and p[1:2] not in (["usuarios"], ["abrir"], ["tickets"]):
                     return self.send_json({"error": "Tu usuario es de solo lectura"}, 403)
             if self.auth_routes(method, p):
                 return
+            if p[1:2] == ["tickets"]:
+                claude_runner.DB = DB_PATH
+                with _lock, connect() as con:
+                    return tickets.handle(self, method, p, con, self.usuario, claude_runner, fin_ejecucion_claude)
         except ValueError as e:
             return self.send_json({"error": str(e)}, 400)
         except Exception as e:  # noqa: BLE001
@@ -420,7 +457,11 @@ class Handler(SimpleHTTPRequestHandler):
                 q = parse_qs(urlparse(self.path).query)
                 cfg = get_config(con)
                 if p[1:] == ["pipeline"]:
-                    return self.send_json(extras.pipeline(cfg["pipeline_root"]))
+                    resp = extras.pipeline(cfg["pipeline_root"])
+                    resp["causas"] = [dict(r) for r in con.execute(
+                        "SELECT causa, COUNT(*) AS cantidad FROM pipeline_notas WHERE causa IS NOT NULL AND causa<>'' "
+                        "GROUP BY causa ORDER BY cantidad DESC")]
+                    return self.send_json(resp)
                 if p[1:] == ["layout"]:
                     pr = con.execute("SELECT * FROM proyectos WHERE id=?", (int(q["proyecto"][0]),)).fetchone()
                     if not pr or not pr["carpeta"]:
@@ -554,7 +595,15 @@ class Handler(SimpleHTTPRequestHandler):
 
 def main():
     init_db()
-    srv = ThreadingHTTPServer((HOST, PORT), partial(Handler, directory=STATIC))
+    srv = None
+    for _ in range(40):  # tras un reinicio automático, espera a que la instancia anterior libere el puerto
+        try:
+            srv = ThreadingHTTPServer((HOST, PORT), partial(Handler, directory=STATIC))
+            break
+        except OSError:
+            time.sleep(0.5)
+    if srv is None:
+        sys.exit(f"El puerto {PORT} está ocupado")
     url = f"http://{HOST}:{PORT}/"
     print(f"Ruta Desarrollo de GD corriendo en {url}  (Ctrl+C para detener)")
     print(f"Base de datos: {DB_PATH}")

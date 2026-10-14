@@ -49,9 +49,12 @@ const ETAPAS_PROY = ['Desarrollo', 'RTB alcanzado'];
 const ESTADOS_PROY = ['Activo', 'Pausado', 'Descartado', 'RTB alcanzado'];
 const ESTADOS_T = ['Por radicar', 'Radicado', 'Requerimiento', 'Respondido', 'No aplica'];
 const RESULTADOS = ['Favorable', 'Con condiciones', 'Desfavorable', 'Sin pronunciamiento de fondo'];
-const EVENTOS = ['Radicado', 'Requerimiento de la entidad', 'Respuesta a requerimiento', 'Insistencia / recordatorio',
+const EVENTOS = ['Radicado', 'Requerimiento de la entidad', 'Respuesta a requerimiento', 'Observaciones del OR', 'Subsanación radicada', 'Insistencia / recordatorio',
   'Derecho de petición / queja', 'Respuesta de la entidad', 'Entrega', 'Nota'];
-const EV_ESTADO = ['Radicado', 'Requerimiento de la entidad', 'Respuesta a requerimiento', 'Respuesta de la entidad', 'Entrega'];
+const EV_ESTADO = ['Radicado', 'Requerimiento de la entidad', 'Respuesta a requerimiento', 'Observaciones del OR', 'Subsanación radicada', 'Respuesta de la entidad', 'Entrega'];
+// abren / cierran una suspensión del plazo: requerimientos de cualquier entidad y rondas de subsanación del ECS ante el OR
+const EV_ABRE = ['Requerimiento de la entidad', 'Observaciones del OR'];
+const EV_CIERRA = ['Respuesta a requerimiento', 'Subsanación radicada'];
 const esEntregable = t => (CAT[t.catalogo_id]?.clase || '') === 'entregable';
 const DEPTOS = ['Amazonas', 'Antioquia', 'Arauca', 'Atlántico', 'Bogotá D.C.', 'Bolívar', 'Boyacá', 'Caldas', 'Caquetá',
   'Casanare', 'Cauca', 'Cesar', 'Chocó', 'Córdoba', 'Cundinamarca', 'Guainía', 'Guaviare', 'Huila', 'La Guajira',
@@ -157,14 +160,15 @@ function tm(t) {
   const m = { sem: 'pend-rad', dias: null, diasHab: null, nreq: 0, susp: 0, vence: null, rest: null };
   const evs = EV[t.id] || [];
   m.nreq = evs.filter(e => e.tipo === 'Requerimiento de la entidad').length;
+  m.nsub = evs.filter(e => e.tipo === 'Observaciones del OR').length;
   if (t.estado === 'No aplica') m.sem = 'na';
   else if (!t.fecha_radicado && t.fecha_respuesta) m.sem = 'sin-rad';
   else if (t.fecha_radicado) {
     const rad = t.fecha_radicado, end = t.fecha_respuesta || HOY;
     let susp = 0, suspCal = 0, open = null;
     for (const e of evs) {
-      if (e.tipo === 'Requerimiento de la entidad' && !open) open = e.fecha;
-      else if (e.tipo === 'Respuesta a requerimiento' && open) { susp += habiles(open, e.fecha); suspCal += calDays(open, e.fecha); open = null; }
+      if (EV_ABRE.includes(e.tipo) && !open) { open = e.fecha; m.abiertoTipo = e.tipo; }
+      else if (EV_CIERRA.includes(e.tipo) && open) { susp += habiles(open, e.fecha); suspCal += calDays(open, e.fecha); open = null; }
     }
     if (open) { susp += habiles(open, end); suspCal += calDays(open, end); }
     const cal = t.tipo_plazo === 'calendario';
@@ -193,7 +197,7 @@ function semPill(t) {
     case 'vencido': return `<span class="pill bad">Vencido hace ${-m.rest} ${u}</span>`;
     case 'porvencer': return `<span class="pill warn">Vence en ${m.rest} ${u}</span>`;
     case 'curso': return `<span class="pill info">En curso · ${m.dias} ${u}</span>`;
-    case 'susp': return `<span class="pill warn">Requerimiento · plazo suspendido</span>`;
+    case 'susp': return `<span class="pill warn">${m.abiertoTipo === 'Observaciones del OR' ? 'En subsanación' : 'Requerimiento'} · plazo suspendido</span>`;
     case 'na': return `<span class="pill">No aplica</span>`;
     case 'sin-rad': return `<span class="pill warn">Respondido · falta fecha de radicado</span>`;
     default: return `<span class="pill">Por radicar</span>`;
@@ -293,8 +297,9 @@ function stats(filter, keyFn, inclPend) {
 
 // ============================================================ router
 const VIEWS = { tablero: vTablero, proyectos: vProyectos, proyecto: vProyecto, pendientes: vPendientes, pipeline: vPipeline, red: vRed,
-  planificador: vPlanificador, comparativo: vComparativo, sharepoint: vSharepoint, catalogo: vCatalogo, datos: vDatos };
+  planificador: vPlanificador, comparativo: vComparativo, sharepoint: vSharepoint, catalogo: vCatalogo, datos: vDatos, soporte: vSoporte };
 let mapInst = null;
+let mapMarkers = {};
 let KEYS = []; // claves para los clics del comparativo (evita escapar texto dentro de onclick)
 const kref = k => { KEYS.push(k); return `entityDrawer(KEYS[${KEYS.length - 1}])`; };
 let LOADED = false;
@@ -326,6 +331,12 @@ function vTablero() {
   const resp = S.tramites.filter(t => t.fecha_respuesta && t.fecha_radicado);
   const conPl = resp.filter(t => t.plazo_dias != null);
   const alerts = [...venc, ...porv, ...ts.filter(t => tm(t).sem === 'susp')];
+  const alertGroups = Object.values(alerts.reduce((acc, t) => {
+    (acc[t.proyecto_id] ||= { pid: t.proyecto_id, items: [], bad: false }).items.push(t);
+    if (tm(t).sem === 'vencido') acc[t.proyecto_id].bad = true;
+    return acc;
+  }, {})).sort((a, b) => (PRO[a.pid]?.nombre || '').localeCompare(PRO[b.pid]?.nombre || ''));
+  const mapList = S.proyectos.filter(p => p.estado !== 'Descartado' && p.lat != null && p.lon != null && p.lat !== '' && p.lon !== '');
   const vigs = ts.filter(t => ['vencida', 'porvencer'].includes(vig(t).s)).sort((a, b) => vig(a).hasta.localeCompare(vig(b).hasta));
   const slow = stats(() => true, t => t.entidad_id, false).filter(s => s.resp).slice(0, 8);
   const maxS = Math.max(1, ...slow.map(s => Math.max(s.prom || 0, s.plazo || 0)));
@@ -349,6 +360,15 @@ function vTablero() {
       ${kpi('Tiempo medio de respuesta', r1(avg(resp.map(t => tm(t).diasHab))), 'días hábiles')}
       ${kpi('Respondidos en plazo', conPl.length ? pct(conPl.filter(t => tm(t).dias <= t.plazo_dias).length, conPl.length) + '%' : '—', `${conPl.length} con plazo legal`)}
     </div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head"><div><h2>Mapa de proyectos</h2>${viabLegend()}</div>
+        <div class="filters">
+          <input id="mapaBuscar" list="dlMapaProy" placeholder="Buscar proyecto por nombre…" autocomplete="off" oninput="buscarEnMapa(this.value)">
+          <datalist id="dlMapaProy">${mapList.map(p => `<option value="${esc(p.nombre)}">`).join('')}</datalist>
+        </div>
+      </div>
+      <div id="map" class="map"></div>
+    </div>
     ${rutaCard()}
     <div class="split">
       <div class="stack">
@@ -356,20 +376,19 @@ function vTablero() {
           <div class="card-head"><h2>Proyectos activos</h2><a href="#/proyectos" class="small">Ver todos →</a></div>
           ${projTable(act)}
         </div>
-        <div class="card">
-          <div class="card-head"><h2>Mapa de proyectos</h2>${viabLegend()}</div>
-          <div id="map" class="map"></div>
-        </div>
       </div>
       <div class="stack">
         <div class="card">
           <div class="card-head"><h2>Alertas</h2><span class="muted small">${alerts.length}</span></div>
-          <div class="alerts">${alerts.length ? alerts.map(t => `
-            <div class="alert" onclick="openTramite(${t.id})">
-              <div class="top">${semPill(t)}<span class="muted small">${tm(t).vence ? 'vence ' + fmtD(tm(t).vence) : ''}</span></div>
-              <div class="t">${esc(ent(t.entidad_id).sigla)} · ${esc(t.nombre)}</div>
-              <div class="muted small">${esc(PRO[t.proyecto_id]?.nombre)}</div>
-            </div>`).join('') : '<div class="empty">Sin alertas. Todo dentro de plazo.</div>'}</div>
+          <div class="alert-groups">${alertGroups.length ? alertGroups.map(g => `
+            <details class="alert-group">
+              <summary><span class="t">${esc(PRO[g.pid]?.nombre)}</span><span class="pill ${g.bad ? 'bad' : 'warn'}">${g.items.length}</span></summary>
+              <div class="alerts">${g.items.map(t => `
+                <div class="alert" onclick="openTramite(${t.id})">
+                  <div class="top">${semPill(t)}<span class="muted small">${tm(t).vence ? 'vence ' + fmtD(tm(t).vence) : ''}</span></div>
+                  <div class="t">${esc(ent(t.entidad_id).sigla)} · ${esc(t.nombre)}</div>
+                </div>`).join('')}</div>
+            </details>`).join('') : '<div class="empty">Sin alertas. Todo dentro de plazo.</div>'}</div>
         </div>
         <div class="card">
           <div class="card-head"><h2>Vigencias de documentos</h2><span class="muted small">vencen en ≤ 60 días</span></div>
@@ -448,12 +467,17 @@ function drawMap(list) {
   L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
     maxZoom: 19, maxNativeZoom: 18, attribution: 'Imágenes © Esri, Maxar, Earthstar Geographics',
   }).addTo(mapInst);
+  // capa de referencia: nombres de municipios, vías y lugares sobre la imagen satelital
+  L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}', {
+    maxZoom: 19, maxNativeZoom: 18,
+  }).addTo(mapInst);
   const css = getComputedStyle(document.documentElement);
   const col = c => css.getPropertyValue({ ok: '--ok', warn: '--warn', bad: '--bad' }[c] || '--muted').trim();
   const pts = [];
+  mapMarkers = {};
   list.filter(p => p.lat != null && p.lon != null && p.lat !== '' && p.lon !== '').forEach(p => {
     const m = pm(p);
-    L.circleMarker([+p.lat, +p.lon], { radius: 9, color: '#fff', weight: 2, fillColor: col(m.viab.c), fillOpacity: .95 })
+    mapMarkers[p.id] = L.circleMarker([+p.lat, +p.lon], { radius: 9, color: '#fff', weight: 2, fillColor: col(m.viab.c), fillOpacity: .95 })
       .addTo(mapInst).bindTooltip(esc(p.nombre.replace(/^GD\s+/, '')), { permanent: true, direction: 'top', offset: [0, -8], className: 'map-lbl' }).bindPopup(`<b>${esc(p.nombre)}</b><br>${esc(p.figura)} · Factibilidad ${m.fact}% · Licenciamiento ${m.lic}%<br>${m.viab.l}<br><a href="#/proyecto/${p.id}">Abrir proyecto</a>`);
     pts.push([+p.lat, +p.lon]);
   });
@@ -461,6 +485,25 @@ function drawMap(list) {
   if (pts.length > 1) mapInst.fitBounds(pts, { padding: [40, 40], maxZoom: 16 });
   else if (pts.length === 1) mapInst.setView(pts[0], 16);
   setTimeout(() => mapInst && mapInst.invalidateSize(), 200);
+}
+
+/** Busca un proyecto por nombre en el mapa del tablero y centra la vista en él. */
+function buscarEnMapa(q) {
+  q = (q || '').trim().toLowerCase();
+  if (!q) return;
+  const ids = Object.keys(mapMarkers);
+  let id = ids.find(i => (PRO[i]?.nombre || '').toLowerCase() === q);
+  if (!id) {
+    const m = ids.filter(i => (PRO[i]?.nombre || '').toLowerCase().includes(q));
+    if (m.length === 1) id = m[0];
+  }
+  if (id) irAProyectoEnMapa(id);
+}
+function irAProyectoEnMapa(id) {
+  const mk = mapMarkers[id];
+  if (!mapInst || !mk) return;
+  mapInst.setView(mk.getLatLng(), 16);
+  mk.openPopup();
 }
 
 function hbars(rows, max) {
@@ -517,7 +560,7 @@ function vProyecto(id) {
   ${devCard(p, m)}
   ${proyExtras(p)}
   <div class="card" style="margin-bottom:16px">
-    <div class="card-head"><h2>Línea de tiempo de trámites</h2><div class="legend"><span><i style="background:var(--ok)"></i>Respondido en plazo</span><span><i style="background:var(--bad)"></i>Fuera de plazo / vencido</span><span><i style="background:var(--info)"></i>En curso</span><span><i style="background:var(--warn)"></i>Suspendido por requerimiento</span></div></div>
+    <div class="card-head"><h2>Línea de tiempo de trámites</h2><div class="legend"><span><i style="background:var(--ok)"></i>Respondido en plazo</span><span><i style="background:var(--bad)"></i>Fuera de plazo / vencido</span><span><i style="background:var(--info)"></i>En curso</span><span><i style="background:var(--warn)"></i>Requerimiento</span><span><i style="background:#ff8a3d"></i>Subsanación (observaciones del OR)</span></div></div>
     <div class="card-pad">${gantt(ts.filter(t => t.fecha_radicado), p.fecha_contrato)}</div>
   </div>
   <div class="card">
@@ -541,7 +584,7 @@ function proyExtras(p) {
       <div id="pmap" class="map"></div></div>
     <div class="stack">
       <div class="card card-pad">
-        <h3 style="margin-bottom:8px">Red</h3>
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><h3>Red</h3><button class="btn sm" onclick="redForm(${p.id})">Editar</button></div>
         <div class="facts">
           <div><span>Operador de red</span><b>${esc(ent(p.or_id).sigla)}</b></div>
           <div><span>Circuito</span><b>${p.circuito ? `<a href="#/red">${esc(p.circuito)}</a>` : '—'}</b></div>
@@ -624,14 +667,14 @@ async function delCosto(id) { if (!confirm('¿Eliminar este costo?')) return; aw
 
 /** Avance de la fase de Desarrollo: Factibilidad (6 áreas) y Licenciamiento en paralelo; RTB cuando ambas llegan al 100 %. */
 function devCard(p, m) {
-  const fila = a => `<div class="dev-fila"><span>${a.ar}</span><div class="bar"><span style="width:${a.pct}%"></span></div><span class="num">${a.n ? `${a.d}/${a.n}` : '—'}</span></div>`;
+  const fila = a => `<div class="dev-fila click" onclick="irArea('${a.ar}')" title="Ver los trámites de ${a.ar}"><span>${a.ar} <span class="ir">↓</span></span><div class="bar"><span style="width:${a.pct}%"></span></div><span class="num">${a.n ? `${a.d}/${a.n}` : '—'}</span></div>`;
   const fact = m.areas.filter(a => AREAS_FACT.includes(a.ar)), lic = m.areas.find(a => a.ar === 'Licenciamiento');
   return `<div class="card" style="margin-bottom:16px">
     <div class="card-head"><div><h2>Desarrollo ${etapaPill(p, m)}</h2><div class="muted small">Prefactibilidad superada con la firma del contrato${p.fecha_contrato ? ' (' + fmtD(p.fecha_contrato) + ')' : ''}. Lo que exige cada área está descrito en el Tablero.</div></div>
       ${m.listoRtb ? `<button class="btn primary" onclick="declararRtb(${p.id})">Declarar RTB →</button>` : ''}</div>
     <div class="card-pad dev-grid">
-      <div><div class="dev-tit">Factibilidad <b>${m.fact}%</b></div>${fact.map(fila).join('')}</div>
-      <div><div class="dev-tit">Licenciamiento <b>${m.lic}%</b></div>${fila(lic)}
+      <div><div class="dev-tit click" onclick="irArea('${AREAS_FACT.find(a => m.areas.find(x => x.ar === a)?.n) || 'Solapamientos'}')">Factibilidad <b>${m.fact}%</b></div>${fact.map(fila).join('')}</div>
+      <div><div class="dev-tit click" onclick="irArea('Licenciamiento')">Licenciamiento <b>${m.lic}%</b></div>${fila(lic)}
         <div class="dev-rtb ${m.rtb || m.listoRtb ? 'ok' : ''}"><b>RTB</b><span>${m.rtb ? 'Alcanzado' : m.listoRtb ? 'Cumple: listo para declarar' : m.est ? 'Estimado: ' + fmtD(m.est.rtb) : ''}</span></div></div>
     </div>
   </div>`;
@@ -647,14 +690,14 @@ function tramTable(ts) {
   return `<div class="table-wrap"><table><thead><tr><th>Entidad</th><th>Trámite</th><th>Radicado</th><th>Respuesta</th><th>Tiempo / plazo</th><th>Estado</th><th>Resultado</th></tr></thead><tbody>
   ${AREAS.map(ar => {
     const x = ts.filter(t => t.area === ar); if (!x.length) return '';
-    return `<tr class="group-row"><td colspan="7">${etapaDe(ar) === 'Factibilidad' ? 'Factibilidad · ' : ''}${ar} · ${x.filter(t => t.estado === 'Respondido').length}/${x.filter(t => t.estado !== 'No aplica').length}</td></tr>` + x.map(t => {
+    return `<tr class="group-row" id="area-${slug(ar)}"><td colspan="7">${etapaDe(ar) === 'Factibilidad' ? 'Factibilidad · ' : ''}${ar} · ${x.filter(t => t.estado === 'Respondido').length}/${x.filter(t => t.estado !== 'No aplica').length}</td></tr>` + x.map(t => {
       const m = tm(t), e = ent(t.entidad_id), en = esEntregable(t);
       return `<tr class="click" onclick="openTramite(${t.id})">
         <td><b>${esc(e.sigla)}</b><div class="muted small">${en ? 'Entregable' : esc(e.tipo)}</div></td>
         <td>${esc(t.nombre)} ${t.adicional ? '<span class="tag acc">adicional</span>' : ''}${t.motivo ? `<div class="muted small">${esc(t.motivo)}</div>` : ''}${t.detalle ? `<div class="small" style="color:var(--accent-ink)">${esc(t.detalle)}</div>` : ''}</td>
         <td class="num">${en ? '—' : fmtD(t.fecha_radicado)}${t.radicado_num ? `<div class="muted small">${esc(t.radicado_num)}</div>` : ''}</td>
         <td class="num">${fmtD(t.fecha_respuesta)}</td>
-        <td class="num">${en ? '—' : `${m.dias != null ? m.dias : '—'} / ${t.plazo_dias ?? 's.p.'}`}${m.nreq ? `<div class="muted small">${m.nreq} req.</div>` : ''}</td>
+        <td class="num">${en ? '—' : `${m.dias != null ? m.dias : '—'} / ${t.plazo_dias ?? 's.p.'}`}${m.nreq ? `<div class="muted small">${m.nreq} req.</div>` : ''}${m.nsub ? `<div class="small" style="color:#e0782f">${m.nsub} subsanación${m.nsub > 1 ? 'es' : ''}</div>` : ''}</td>
         <td>${semPill(t)}</td>
         <td>${en ? '' : resPill(t.resultado)}</td></tr>`;
     }).join('');
@@ -676,12 +719,13 @@ function gantt(ts, start) {
       const m = tm(t), end = t.fecha_respuesta || HOY;
       const cls = t.fecha_respuesta ? (m.sem === 'late-resp' ? 'late' : '') : (m.sem === 'vencido' ? 'late' : 'pend');
       const evs = EV[t.id] || []; let open = null; const susp = [];
-      evs.forEach(e => { if (e.tipo === 'Requerimiento de la entidad' && !open) open = e.fecha; else if (e.tipo === 'Respuesta a requerimiento' && open) { susp.push([open, e.fecha]); open = null; } });
-      if (open) susp.push([open, end]);
+      let tipoAb = null;
+      evs.forEach(e => { if (EV_ABRE.includes(e.tipo) && !open) { open = e.fecha; tipoAb = e.tipo; } else if (EV_CIERRA.includes(e.tipo) && open) { susp.push([open, e.fecha, tipoAb]); open = null; } });
+      if (open) susp.push([open, end, tipoAb]);
       return `<div class="g-row"><div class="g-lbl" title="${esc(t.nombre)}"><b>${esc(ent(t.entidad_id).sigla)}</b> · ${esc(t.nombre)}</div>
         <div class="g-track" onclick="openTramite(${t.id})" style="cursor:pointer">
           <div class="g-bar ${cls}" style="left:${x(t.fecha_radicado)}%;width:${Math.max(.6, x(end) - x(t.fecha_radicado))}%" title="${fmtD(t.fecha_radicado)} → ${t.fecha_respuesta ? fmtD(end) : 'hoy'} · ${m.dias} d"></div>
-          ${susp.map(([s, e]) => `<div class="g-bar susp" style="left:${x(s)}%;width:${Math.max(.4, x(e) - x(s))}%"></div>`).join('')}
+          ${susp.map(([s, e, k], i) => `<div class="g-bar ${k === 'Observaciones del OR' ? 'subs' : 'susp'}" style="left:${x(s)}%;width:${Math.max(.4, x(e) - x(s))}%" title="${k === 'Observaciones del OR' ? 'Subsanación ' + (i + 1) : 'Requerimiento'}: ${fmtD(s)} → ${fmtD(e)}"></div>`).join('')}
         </div></div>`;
     }).join('')}
     <div class="g-axis"><div></div><div class="ticks">${ticks.filter((_, i) => i % step === 0).map(t => `<span style="left:${x(iso(t))}%">${MESES[t.getUTCMonth()]} ${String(t.getUTCFullYear()).slice(2)}</span>`).join('')}</div></div>
@@ -1028,13 +1072,14 @@ function calidadCard() {
 }
 
 // ------------------------------------------------------------ mis pendientes
-let fPend = { resp: ls.get('responsable') || '', horizonte: '30' };
+let fPend = { resp: ls.get('responsable') || '', horizonte: '30', proyecto: '' };
 const responsables = () => [...new Set([...S.tramites.map(t => t.responsable), ...S.proyectos.map(p => p.responsable)].filter(Boolean))].sort();
 function pendientes() {
   const act = new Set(S.proyectos.filter(p => p.estado === 'Activo').map(p => p.id));
   const lim = addHabiles(HOY, +fPend.horizonte || 30);
   return S.tramites.filter(t => act.has(t.proyecto_id) && t.estado !== 'No aplica' && !t.fecha_respuesta)
     .filter(t => !fPend.resp || (t.responsable || PRO[t.proyecto_id].responsable) === fPend.resp)
+    .filter(t => !fPend.proyecto || t.proyecto_id === +fPend.proyecto)
     .map(t => {
       const m = tm(t);
       const fecha = t.compromiso || m.vence || null;
@@ -1046,22 +1091,24 @@ function pendientes() {
 }
 function vPendientes() {
   const ps = pendientes(), resps = responsables();
-  const grupo = (tit, xs) => xs.length ? `<tr class="group-row"><td colspan="5">${tit} · ${xs.length}</td></tr>` + xs.map(({ t, fecha, motivo, atrasado }) => `
+  const activos = S.proyectos.filter(p => p.estado === 'Activo').sort((a, b) => a.nombre.localeCompare(b.nombre));
+  const grupo = (tit, xs) => xs.length ? `<tr class="group-row"><td colspan="5">${esc(tit)} · ${xs.length}</td></tr>` + xs.map(({ t, fecha, motivo, atrasado }) => `
     <tr class="click" onclick="openTramite(${t.id})">
-      <td><b>${esc(PRO[t.proyecto_id].nombre)}</b><div class="muted small">${esc(t.area)}</div></td>
-      <td>${esc(t.nombre)}<div class="muted small">${esc(ent(t.entidad_id).sigla)}</div></td>
+      <td><b>${esc(t.area)}</b><div class="muted small">${esc(ent(t.entidad_id).sigla)}</div></td>
+      <td>${esc(t.nombre)}</td>
       <td>${esc(t.responsable || PRO[t.proyecto_id].responsable || '—')}</td>
       <td class="num">${fecha ? fmtD(fecha) : '—'}<div class="small" style="color:${atrasado ? 'var(--bad)' : 'var(--muted)'}">${motivo}</div></td>
       <td>${semPill(t)}</td></tr>`).join('') : '';
-  const atras = ps.filter(x => x.atrasado), sem = ps.filter(x => !x.atrasado && x.fecha && x.fecha <= addHabiles(HOY, 5)), resto = ps.filter(x => !x.atrasado && !(x.fecha && x.fecha <= addHabiles(HOY, 5)));
-  return `${head('Mis pendientes', 'Trámites y entregables sin cerrar, ordenados por fecha compromiso o vencimiento legal', `<button class="btn" onclick="resumenSemanal()">Resumen semanal</button>`)}
+  const porProyecto = [...new Set(ps.map(x => x.t.proyecto_id))].map(id => PRO[id]).filter(Boolean).sort((a, b) => a.nombre.localeCompare(b.nombre));
+  return `${head('Mis pendientes', 'Trámites y entregables sin cerrar, agrupados por proyecto y ordenados por fecha compromiso o vencimiento legal', `<button class="btn" onclick="resumenSemanal()">Resumen semanal</button>`)}
   <div class="card card-pad" style="margin-bottom:16px"><div class="filters">
+    <select onchange="fPend.proyecto=this.value;render()"><option value="">Todos los proyectos</option>${activos.map(p => `<option value="${p.id}" ${+fPend.proyecto === p.id ? 'selected' : ''}>${esc(p.nombre)}</option>`).join('')}</select>
     <select onchange="fPend.resp=this.value;ls.set('responsable',this.value);render()"><option value="">Todos los responsables</option>${resps.map(r => `<option ${fPend.resp === r ? 'selected' : ''}>${esc(r)}</option>`).join('')}</select>
     <select onchange="fPend.horizonte=this.value;render()">${[['5', 'Próxima semana'], ['10', 'Próximas 2 semanas'], ['30', 'Próximo mes y medio'], ['9999', 'Todo']].map(([v, l]) => `<option value="${v}" ${fPend.horizonte === v ? 'selected' : ''}>${l}</option>`).join('')}</select>
     <span class="muted small">El responsable y la fecha compromiso se asignan en “Editar datos del trámite”. Si un trámite no tiene responsable, se usa el del proyecto.</span>
   </div></div>
-  <div class="card">${ps.length ? `<div class="table-wrap"><table><thead><tr><th>Proyecto</th><th>Trámite</th><th>Responsable</th><th>Fecha</th><th>Estado</th></tr></thead><tbody>
-    ${grupo('Atrasados', atras)}${grupo('Esta semana', sem)}${grupo('Más adelante o sin fecha', resto)}</tbody></table></div>` : '<div class="empty">No hay pendientes con estos filtros.</div>'}</div>`;
+  <div class="card">${ps.length ? `<div class="table-wrap"><table><thead><tr><th>Área</th><th>Trámite</th><th>Responsable</th><th>Fecha</th><th>Estado</th></tr></thead><tbody>
+    ${porProyecto.map(p => grupo(p.nombre, ps.filter(x => x.t.proyecto_id === p.id))).join('')}</tbody></table></div>` : '<div class="empty">No hay pendientes con estos filtros.</div>'}</div>`;
 }
 function resumenSemanal() {
   const ps = pendientes(), act = S.proyectos.filter(p => p.estado === 'Activo');
@@ -1086,33 +1133,54 @@ let PIPE = null;
 function vPipeline() {
   if (!PIPE) return `${head('Embudo del pipeline', 'Predios por etapa del pipeline en SharePoint')}<div class="card card-pad muted">Leyendo carpetas…</div>`;
   if (PIPE.error) return `${head('Embudo del pipeline')}<div class="note warn">${esc(PIPE.error)}</div>`;
-  const et = PIPE.etapas, activas = et.filter(e => !['Standby', 'Descartados'].includes(e.etapa) && !/prospecci/i.test(e.etapa));
-  const max = Math.max(1, ...et.map(e => e.gd || e.carpetas));
+  const et = PIPE.etapas, activas = et.filter(e => e.etapa !== 'Descartados' && !/prospecci/i.test(e.etapa));
   const notas = Object.fromEntries((S.pipeline_notas || []).map(n => [n.carpeta, n]));
   const totalGd = et.reduce((a, e) => a + e.gd, 0), desc = et.find(e => e.etapa === 'Descartados');
-  const fila = e => `<div class="hb" style="cursor:default"><span class="nm">${esc(e.etapa)}</span>
-    <div class="tr"><div class="fill ${e.etapa === 'Descartados' ? 'bad' : e.etapa === 'Standby' ? 'warn' : ''}" style="width:${pct(e.gd || e.carpetas, max)}%"></div></div>
-    <span class="v">${e.gd} GD · ${e.carpetas} carp.</span></div>`;
-  return `${head('Embudo del pipeline', 'Predios por etapa según las carpetas de SharePoint (01 Pipeline y 02 Archivo)', `<button class="btn" onclick="PIPE=null;render()">Actualizar</button>`)}
+  const causas = PIPE.causas || [];
+  const maxEtapa = Math.max(1, ...activas.map(e => e.gd));
+  const filaEtapa = e => `<div class="hb" style="cursor:default"><span class="nm">${esc(e.etapa)}</span>
+    <div class="tr"><div class="fill" style="width:${pct(e.gd, maxEtapa)}%"></div></div>
+    <span class="v">${e.gd} GD · ${e.carpetas} carpetas</span></div>`;
+  const maxCausa = Math.max(1, ...causas.map(c => c.cantidad));
+  const filaCausa = c => `<div class="hb" style="cursor:default"><span class="nm">${esc(c.causa)}</span>
+    <div class="tr"><div class="fill bad" style="width:${pct(c.cantidad, maxCausa)}%"></div></div>
+    <span class="v">${c.cantidad}</span></div>`;
+  const pendientes = (desc?.proyectos || []).filter(x => !notas[x.carpeta]?.causa);
+  return `${head('Embudo del pipeline', 'Predios por etapa según las carpetas del pipeline (01 Pipeline y 02 Archivo)', `<button class="btn" onclick="PIPE=null;render()">Actualizar</button>`)}
   <div class="kpis">
     ${activas.map(e => kpi(e.etapa, e.gd, `${e.carpetas} carpetas`)).join('')}
-    ${kpi('Standby', et.find(e => e.etapa === 'Standby')?.gd ?? 0, 'en pausa', 'warn')}
     ${kpi('Descartados', desc?.gd ?? 0, totalGd ? `${pct(desc?.gd || 0, totalGd)} % del total` : '', 'bad')}
   </div>
-  <div class="split">
-    <div class="card"><div class="card-head"><h2>GD por etapa</h2><span class="muted small">el número de GD se cuenta en el nombre de la carpeta (“1 y 2” = 2 GD)</span></div>
-      <div class="card-pad"><div class="hbars">${et.map(fila).join('')}</div>
-      ${activas.length > 1 ? `<div class="legend" style="margin-top:14px">${activas.slice(1).map((e, i) => `<span>${esc(activas[i].etapa)} → ${esc(e.etapa)}: <b>${activas[i].gd ? pct(e.gd, activas[i].gd) : 0} %</b></span>`).join('')}</div>` : ''}</div></div>
-    <div class="card"><div class="card-head"><h2>Causas de descarte</h2><span class="muted small">insumo para el análisis de la tesis</span></div>
-      ${desc?.proyectos.length ? `<div class="table-wrap"><table><tbody>${desc.proyectos.map(x => `<tr class="click" onclick="causaForm('${encodeURIComponent(x.carpeta)}')">
-        <td><b>${esc(x.nombre)}</b></td><td>${notas[x.carpeta]?.causa ? `<span class="pill bad nodot">${esc(notas[x.carpeta].causa)}</span>` : '<span class="muted small">registrar causa →</span>'}</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Sin proyectos descartados.</div>'}
+  <div class="grid g2">
+    <div class="card"><div class="card-head"><h2>GD por etapa</h2><span class="muted small">según las carpetas de cada etapa del pipeline</span></div>
+      <div class="card-pad"><div class="hbars">${activas.map(filaEtapa).join('') || '<div class="empty">Sin datos.</div>'}</div></div>
+    </div>
+    <div class="card"><div class="card-head"><h2>Causas de descarte</h2><span class="muted small">asignadas por proyecto desde esta plataforma</span></div>
+      ${causas.length ? `<div class="card-pad"><div class="hbars">${causas.map(filaCausa).join('')}</div></div>` : '<div class="empty">Aún no hay causas de descarte registradas.</div>'}
     </div>
   </div>
-  <div class="card" style="margin-top:16px"><div class="card-head"><h2>Detalle por etapa</h2></div>
-    <div class="card-pad grid g3">${et.map(e => `<div><h3 style="margin-bottom:6px">${esc(e.etapa)} <span class="muted small">(${e.carpetas})</span></h3>
-      <div class="small" style="display:flex;flex-direction:column;gap:2px">${e.proyectos.map(x => `<span>${esc(x.nombre)}${notas[x.carpeta]?.causa ? ` <span class="muted">· ${esc(notas[x.carpeta].causa)}</span>` : ''}</span>`).join('') || '<span class="muted">—</span>'}</div></div>`).join('')}</div></div>`;
+  <div class="card" style="margin-top:16px"><div class="card-head"><h2>Descartados por clasificar</h2><span class="muted small">al registrar la causa, el proyecto sale de este listado y queda contado en la gráfica</span></div>
+    ${pendientes.length ? `<div class="table-wrap"><table><tbody>${pendientes.map(x => `<tr class="click" onclick="causaForm('${encodeURIComponent(x.carpeta)}')">
+      <td><b>${esc(x.nombre)}</b></td><td class="muted small">registrar causa →</td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Todos los descartados ya tienen causa registrada.</div>'}
+  </div>
+  <div class="card" style="margin-top:16px"><div class="card-head"><h2>Carpetas por etapa</h2><span class="muted small">ubicación de cada predio en el pipeline</span></div>
+    <div class="alert-groups">${activas.map(e => `
+      <details class="alert-group">
+        <summary><span class="t">${esc(e.etapa)}</span><span class="pill">${e.carpetas}</span></summary>
+        <div class="alerts">${e.proyectos.map(x => `
+          <details class="carpeta-item">
+            <summary>${esc(x.nombre)}</summary>
+            <div class="ubicacion"><a href="${esc(spUrl(x.carpeta))}" target="_blank" rel="noopener">abrir en SharePoint</a> · <a href="#" onclick="abrirCarpeta(event, '${encodeURIComponent(x.carpeta)}')">abrir en este PC</a></div>
+          </details>`).join('') || '<div class="empty">—</div>'}</div>
+      </details>`).join('') || '<div class="empty">Sin carpetas.</div>'}</div>
+  </div>`;
 }
 vPipeline.after = async () => { if (!PIPE) { try { PIPE = await api('GET', '/api/pipeline'); } catch (e) { PIPE = { error: e.message }; } render(); } };
+async function abrirCarpeta(ev, carpetaEnc) {
+  ev.preventDefault();
+  try { await api('POST', '/api/abrir', { ruta: decodeURIComponent(carpetaEnc) }); toast('Abriendo la carpeta…'); }
+  catch (e) { alert(e.message); }
+}
 const CAUSAS = ['Restricción de red / sin capacidad', 'Restricción ambiental', 'Traslape minero o de hidrocarburos', 'Problemas de titularidad', 'Consulta previa / comunidades',
   'Uso del suelo incompatible', 'Pendiente o topografía', 'Orden público', 'Propietario desistió', 'Condiciones económicas', 'Otra'];
 function causaForm(carpetaEnc) {
@@ -1128,6 +1196,17 @@ async function saveCausa(carpetaEnc, id) {
 }
 
 // ------------------------------------------------------------ red y circuitos
+const dispInput = v => `<div class="dispbox"><input name="capacidad_disp" type="number" step="any" value="${esc(v)}" placeholder="lo que informe el OR">
+  <select name="unidad_disp"><option value="kW">kW</option><option value="MW">MW</option><option value="MVA">MVA</option></select></div>
+  <div class="hint">Es lo que el operador de red informa como <b>libre</b> para nueva generación, no la capacidad total de la subestación.</div>`;
+/** Convierte la capacidad disponible a kW; si el valor parece estar en MW/MVA pero se marcó kW, pregunta. */
+function dispKw(d) {
+  const v = nz(d.capacidad_disp) == null ? null : +String(d.capacidad_disp).replace(',', '.');
+  if (v == null) return { ok: true, kw: null };
+  const kw = d.unidad_disp === 'kW' ? v : v * 1000;
+  if (d.unidad_disp === 'kW' && v > 0 && v < 100 && !confirm(`Registraste ${v} kW de capacidad disponible, un valor muy bajo para un circuito. ¿Seguro que es en kW y no en MW o MVA?`)) return { ok: false };
+  return { ok: true, kw };
+}
 function vRed() {
   const ps = S.proyectos.filter(p => p.circuito && p.estado !== 'Descartado');
   const g = {}; ps.forEach(p => (g[`${p.or_id}|${p.circuito}`] ||= []).push(p));
@@ -1137,13 +1216,15 @@ function vRed() {
     return { or: +or, cod, c, xs, kw, caps };
   }).sort((a, b) => b.xs.length - a.xs.length);
   return `${head('Red y circuitos', 'GD de Solcor por circuito y subestación, para anticipar la saturación de la red')}
-  <div class="note" style="margin-bottom:14px">El circuito y la capacidad de la subestación se leen de las solicitudes y los insumos del operador de red. La <b>capacidad disponible</b> se registra a mano con lo que informe el OR. Si la suma de los GD de Solcor la supera, el circuito se marca en rojo.</div>
-  <div class="card">${filas.length ? `<div class="table-wrap"><table><thead><tr><th>Operador de red</th><th>Circuito</th><th>Subestación</th><th>Capacidad SE (insumos)</th><th class="r">GD de Solcor</th><th class="r">kW solicitados</th><th class="r">Disponible (OR)</th><th>Estado</th><th></th></tr></thead><tbody>
+  <div class="note" style="margin-bottom:14px">El circuito y la capacidad de la subestación se leen de las solicitudes y los insumos del operador de red. La <b>capacidad disponible</b> (lo que queda libre para nueva generación) se registra a mano con lo que informe el OR, en kW, MW o MVA. Si la suma de los GD de Solcor la supera, el circuito se marca en rojo. “% de la SE” compara los kW de Solcor con la capacidad total de la subestación (aprox. 1 MVA ≈ 1.000 kW).</div>
+  <div class="card">${filas.length ? `<div class="table-wrap"><table><thead><tr><th>Operador de red</th><th>Circuito</th><th>Subestación</th><th>Capacidad SE (insumos)</th><th class="r">GD de Solcor</th><th class="r">kW solicitados</th><th class="r">% de la SE</th><th class="r">Disponible (OR)</th><th>Estado</th><th></th></tr></thead><tbody>
     ${filas.map(f => { const disp = f.c?.capacidad_disp_kw; const sat = disp && f.kw > disp; return `<tr>
       <td><b>${esc(ent(f.or).sigla)}</b></td><td><b>${esc(f.cod)}</b></td><td>${esc(f.c?.subestacion || '—')}</td>
       <td>${f.caps.map(v => String(v).replace('.', ',') + ' MVA').join(' / ') || '—'}${f.caps.length > 1 ? ' <span class="pill bad nodot">no coinciden</span>' : ''}</td>
       <td class="r">${f.xs.length}<div class="muted small">${f.xs.map(p => esc(p.nombre.replace(/^GD\s+/, ''))).join(', ')}</div></td>
-      <td class="r num">${f.kw.toLocaleString('es-CO')}</td><td class="r num">${disp ? (+disp).toLocaleString('es-CO') : '—'}</td>
+      <td class="r num">${f.kw.toLocaleString('es-CO')} kW</td>
+      <td class="r num">${f.caps.length ? Math.round(f.kw / (Math.min(...f.caps) * 1000) * 100) + ' %' : '—'}</td>
+      <td class="r num">${disp ? (+disp).toLocaleString('es-CO') + ' kW' : '—'}</td>
       <td>${sat ? '<span class="pill bad">Supera lo disponible</span>' : disp ? '<span class="pill ok">Dentro de lo disponible</span>' : f.xs.length > 1 ? '<span class="pill warn">Varios GD, sin dato del OR</span>' : '<span class="pill">Sin dato del OR</span>'}</td>
       <td class="r"><button class="btn sm" onclick="circuitoForm(${f.or}, '${esc(f.cod)}')">Editar</button></td></tr>`; }).join('')}
   </tbody></table></div>` : '<div class="empty">Aún no hay proyectos con circuito registrado.</div>'}</div>`;
@@ -1152,13 +1233,395 @@ function circuitoForm(or, cod) {
   const c = (S.circuitos || []).find(x => x.codigo === cod && x.or_id === or) || {};
   modal(`Circuito ${esc(cod)} · ${esc(ent(or).sigla)}`, `<form id="cif" class="form-grid">
     <div><label>Subestación</label><input name="subestacion" value="${esc(c.subestacion)}"></div>
-    <div><label>Capacidad disponible informada por el OR (kW)</label><input name="capacidad_disp_kw" type="number" step="any" value="${esc(c.capacidad_disp_kw)}"></div>
+    <div><label>Capacidad disponible informada por el OR</label>${dispInput(c.capacidad_disp_kw)}</div>
     <div class="full"><label>Notas (fuente, fecha del dato, otros promotores en cola…)</label><textarea name="notas">${esc(c.notas)}</textarea></div></form>`,
     `<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn primary" onclick="saveCircuito(${or}, '${esc(cod)}', ${c.id || 'null'})">Guardar</button>`);
 }
 async function saveCircuito(or, cod, id) {
-  const d = { ...formData($('#cif')), codigo: cod, or_id: or }; d.capacidad_disp_kw = nz(d.capacidad_disp_kw) == null ? null : +d.capacidad_disp_kw;
+  const f = formData($('#cif')), dk = dispKw(f); if (!dk.ok) return;
+  const d = { subestacion: f.subestacion, notas: f.notas, codigo: cod, or_id: or, capacidad_disp_kw: dk.kw };
   await api(id ? 'PUT' : 'POST', id ? `/api/circuitos/${id}` : '/api/circuitos', d); closeModal(); await refresh(); toast('Circuito guardado');
+}
+
+// ------------------------------------------------------------ navegación por áreas
+const strip = s => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '');
+const slug = s => strip(s).toLowerCase().replace(/[^a-z0-9]+/g, '-');
+function irArea(ar) {
+  const el = document.getElementById('area-' + slug(ar));
+  if (!el) return toast(`${ar}: este proyecto no tiene trámites en esa área`);
+  const destino = el.getBoundingClientRect().top + window.scrollY - 16;
+  window.scrollTo({ top: destino, behavior: 'smooth' });
+  setTimeout(() => { if (Math.abs(window.scrollY - destino) > 40) window.scrollTo(0, destino); }, 600); // respaldo si el navegador no anima
+  const filas = []; let n = el.nextElementSibling;
+  while (n && !n.classList.contains('group-row')) { filas.push(n); n = n.nextElementSibling; }
+  [el, ...filas].forEach(f => { f.classList.remove('flash'); void f.offsetWidth; f.classList.add('flash'); });
+}
+
+// ------------------------------------------------------------ datos de red editables
+function redForm(pid) {
+  const p = PRO[pid], c = (S.circuitos || []).find(x => x.codigo === p.circuito && x.or_id === p.or_id) || {};
+  const ors = S.entidades.filter(e => e.tipo === 'Operador de red');
+  modal(`Datos de red · ${esc(p.nombre)}`, `<form id="rdf" class="form-grid">
+    <div><label>Operador de red</label><select name="or_id">${entOptions(ors, p.or_id, suggest(ors, p.departamento))}</select></div>
+    <div><label>Circuito</label><input name="circuito" value="${esc(p.circuito)}"></div>
+    <div><label>Subestación</label><input name="subestacion" value="${esc(p.subestacion || c.subestacion)}"></div>
+    <div><label>Capacidad de la subestación (MVA)</label><input name="capacidad_se_mva" type="number" step="any" value="${esc(p.capacidad_se_mva)}"></div>
+    <div><label>Capacidad disponible informada por el OR</label>${dispInput(c.capacidad_disp_kw)}</div>
+    <div><label>Capacidad del proyecto (kWac)</label><input name="capacidad_kw" type="number" step="any" value="${esc(p.capacidad_kw)}"></div>
+    <div class="full"><div class="hint">Los valores que edites a mano se respetan: la sincronización con SharePoint solo completa campos vacíos.</div></div>
+  </form>`, `<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn primary" onclick="saveRed(${pid}, ${c.id || 'null'})">Guardar</button>`);
+}
+async function saveRed(pid, cid) {
+  const d = formData($('#rdf')), dk = dispKw(d); if (!dk.ok) return;
+  const num = v => nz(v) == null ? null : +String(v).replace(',', '.');
+  await api('PUT', `/api/proyectos/${pid}`, { or_id: +d.or_id, circuito: nz(d.circuito), subestacion: nz(d.subestacion), capacidad_se_mva: num(d.capacidad_se_mva), capacidad_kw: num(d.capacidad_kw) });
+  if (d.circuito && (dk.kw != null || cid)) {
+    const c = { codigo: d.circuito, or_id: +d.or_id, subestacion: nz(d.subestacion), capacidad_disp_kw: dk.kw };
+    await api(cid ? 'PUT' : 'POST', cid ? `/api/circuitos/${cid}` : '/api/circuitos', c);
+  }
+  closeModal(); await refresh(); toast('Datos de red actualizados');
+}
+
+// ------------------------------------------------------------ soporte: asistente + tiquets
+const AYUDA = [
+  { t: 'Registrar un radicado o una respuesta', k: 'radicado radicar respuesta respondio registrar evento fecha oficio', a: 'Abre el proyecto, haz clic en el trámite y usa <b>Registrar evento</b>: elige <i>Radicado</i> (con su número) o <i>Respuesta de la entidad</i> (con el resultado). Si el documento está en SharePoint, la sincronización lo registra sola.' },
+  { t: 'Requerimientos y plazos suspendidos', k: 'requerimiento suspendido suspension plazo informacion adicional entidad pide', a: 'Registra <i>Requerimiento de la entidad</i> el día que la entidad pide información: el plazo legal se suspende. Cuando Solcor responda, registra <i>Respuesta a requerimiento</i> y el conteo se reanuda (Ley 1755 de 2015, art. 17).' },
+  { t: 'Subsanaciones del estudio de conexión (ECS)', k: 'subsanacion subsanaciones observaciones ecs estudio conexion ebsa operador ronda corregir', a: 'Abre el trámite “Radicación y aprobación del estudio de conexión (ECS)”: en <b>Subsanaciones</b> registra cada ronda (fecha de las observaciones del OR y fecha en que Solcor radicó la subsanación). Mientras está en curso, el plazo del OR se suspende y en la línea de tiempo se ve en naranja. La aprobación final del ECS se registra como <i>Respuesta de la entidad</i>.' },
+  { t: 'Cómo se cuentan los días', k: 'dias habiles festivos conteo calculo plazo vence vencido tiempo', a: 'Se cuentan días hábiles desde el día siguiente al radicado, sin sábados, domingos ni festivos de Colombia, y sin el tiempo suspendido por requerimientos. “Vencido” significa que la entidad superó su plazo legal sin responder.' },
+  { t: 'Sincronización con SharePoint', k: 'sharepoint sincronizar sincronizacion actualizar carpeta subir archivo pdf e3 pipeline automatico', a: 'Cada 30 minutos la plataforma lee la carpeta del Pipeline (E3) y registra radicados, respuestas, entregables, PVsyst, layout y costos. Para verlo de inmediato: pestaña <b>SharePoint → Escanear ahora</b>. Usa nombres con fecha al inicio (AAAAMMDD) y la estructura de carpetas habitual.' },
+  { t: 'Subí un archivo y no aparece', k: 'no aparece sale subi archivo falta dudosa revisar calidad', a: 'Puede ser: (1) aún no pasa la sincronización (máximo 30 min; usa “Escanear ahora”); (2) su fecha es dudosa y quedó para revisión en la pestaña SharePoint; (3) el archivo no se puede leer (escaneado o página de error). Revisa el panel <b>Calidad de datos</b> del Tablero.' },
+  { t: 'Agregar una consulta adicional', k: 'agregar consulta adicional hallazgo ecopetrol ducto cenit titular minero nueva entidad', a: 'En el proyecto, botón <b>+ Agregar consulta</b>: elige el hallazgo (bloque de hidrocarburos, ducto, título minero…), la entidad y la fecha de radicado. Si la entidad no existe, créala con “+ Nueva”.' },
+  { t: 'Crear un proyecto', k: 'crear proyecto nuevo contrato firmado registrar predio', a: 'Los proyectos de E3 se crean solos desde SharePoint. Para uno manual: <b>Proyectos → + Nuevo proyecto</b>; la plataforma genera los trámites según la figura y sugiere la CAR y el operador de red del departamento.' },
+  { t: 'Factibilidad, Licenciamiento y RTB', k: 'factibilidad licenciamiento rtb porcentaje avance etapa area social predial ingenieria juridico conexion solapamientos', a: 'Factibilidad (6 áreas en paralelo) y Licenciamiento avanzan al tiempo. El % de Factibilidad es el promedio de sus áreas. El proyecto es RTB cuando ambas llegan al 100 % sin resultados desfavorables. Haz clic en cada área del proyecto para bajar a sus trámites; la descripción de cada área está en el Tablero.' },
+  { t: 'Valores del PVsyst', k: 'pvsyst p50 p75 p90 energia produccion simulacion', a: 'La plataforma toma el reporte PVsyst más reciente de cada GD en SharePoint y muestra P50, P75 y P90 (MWh/año) en el entregable “Simulación PVsyst” del área Ingeniería.' },
+  { t: 'Carta de insistencia o queja ante la SSPD', k: 'insistencia carta queja sspd vencido responde derecho peticion word', a: 'Abre un trámite vencido: aparece <b>Generar insistencia (Word)</b>; si es un operador de red, también <b>Queja ante la SSPD</b>. Los datos del firmante se editan en <b>Datos</b>.' },
+  { t: 'Costos de desarrollo', k: 'costo costos pago pagos presupuesto kiandor factura valor', a: 'En el proyecto, tarjeta <b>Costos de desarrollo</b>: “+ Costo” para registrar uno, clic en un costo para editarlo. Los comprobantes de pago en SharePoint se leen solos. El presupuesto se define en “Editar” del proyecto.' },
+  { t: 'Circuito y capacidad de la subestación', k: 'circuito subestacion capacidad mva red disponible saturacion operador ebsa', a: 'En el proyecto, tarjeta <b>Red → Editar</b>: circuito, subestación, capacidad (MVA) y capacidad disponible informada por el OR. La vista <b>Red y circuitos</b> alerta si los GD de Solcor superan lo disponible.' },
+  { t: 'Editar datos del proyecto', k: 'editar modificar cambiar dato datos proyecto coordenadas municipio capacidad corregir', a: 'Botón <b>Editar</b> en el encabezado del proyecto, o “Editar” en la tarjeta Red. Lo que edites a mano se respeta: la sincronización solo completa campos vacíos.' },
+  { t: 'Usuarios y contraseña', k: 'usuario usuarios contrasena clave olvide acceso rol administrador lector editor', a: 'Cambia tu contraseña en la barra lateral (“Cambiar contraseña”). Si la olvidaste, un administrador te asigna una nueva en <b>Datos → Usuarios</b>, donde también se crean usuarios y roles.' },
+  { t: 'Responsables y Mis pendientes', k: 'responsable pendientes compromiso asignar resumen semanal tareas', a: 'En cada trámite, “Editar datos del trámite”: responsable y fecha compromiso. La vista <b>Mis pendientes</b> los ordena por atraso; “Resumen semanal” arma el texto para Teams o correo.' },
+  { t: 'Embudo y causas de descarte', k: 'embudo pipeline e1 e2 descartado descarte causa conversion ubicacion carpeta', a: 'La vista <b>Embudo del pipeline</b> cuenta los GD por carpeta de cada etapa (E1 a E4) y los descartados. Haz clic en un descartado para registrar su causa; cada vez que se registra, sale del listado de pendientes y queda contado en la gráfica de causas. En <b>Carpetas por etapa</b>, despliega una etapa y haz clic en una carpeta para ver su ubicación (SharePoint o en este PC).' },
+  { t: 'Exportar o respaldar', k: 'exportar excel csv respaldo backup descargar datos tesis', a: '<b>Datos → Descargar CSV</b> exporta todos los trámites para Excel. “Descargar respaldo” guarda toda la base.' },
+  { t: 'La página no carga', k: 'carga caido servidor conexion error pagina apagado iniciar', a: 'El servidor local se apaga al reiniciar el PC. Ejecuta <b>iniciar.bat</b> en la carpeta ruta-rtb y deja abierta su ventana.' },
+  { t: 'Cómo funcionan los tiquets', k: 'tiquet tiquets ticket tickets mejora error sugerencia solicitud soporte aceptar', a: 'Cualquiera puede crear un tiquet (mejora, error, duda o dato incorrecto). Un administrador lo abre en <b>Soporte</b> y pulsa <b>Aceptar y ejecutar con Claude</b> (o “Ejecutar con Claude ahora” si ya estaba aceptado). Claude hace una copia de la base, implementa la mejora y deja el tiquet en “Listo para revisar”; el administrador lo verifica y lo cierra.' },
+];
+const STOP = new Set('de la el los las un una y o en a que se como para por con del al mi me es no lo le su sus hay hago puedo donde cual cuando porque esta este'.split(' '));
+const palabras = s => strip(s).toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 2 && !STOP.has(w));
+function responder(q) {
+  const qs = palabras(q); if (!qs.length) return [];
+  return AYUDA.map(e => {
+    const ks = [...new Set([...palabras(e.k), ...palabras(e.t)])];
+    const score = qs.reduce((a, w) => a + (ks.some(k => k.startsWith(w) || w.startsWith(k)) ? 1 : 0), 0);
+    return { e, score };
+  }).filter(x => x.score > 0).sort((a, b) => b.score - a.score).slice(0, 2).map(x => x.e);
+}
+let CHAT = [{ de: 'bot', html: 'Hola, soy el asistente de la plataforma. Escribe tu duda (por ejemplo: “¿cómo registro un radicado?”). Si no la resuelvo, puedes crear un tiquet.' }];
+let ULTIMA_DUDA = '';
+function chatHtml() {
+  const sug = ['¿Cómo registro un radicado?', 'Subí un archivo y no aparece', '¿Cómo edito la capacidad de la subestación?', '¿Cómo funcionan los tiquets?'];
+  return `<div class="chat" id="chatLog">${CHAT.map(m => `<div class="msg ${m.de}">${m.html}</div>`).join('')}</div>
+    <form class="chat-in" onsubmit="preguntar(event)"><input id="chatQ" placeholder="Escribe tu duda…" autocomplete="off"><button class="btn primary">Enviar</button></form>
+    <div class="chat-sug">${sug.map((s, i) => `<button type="button" class="tag" onclick="preguntar(null, ${i})">${s}</button>`).join('')}</div>`;
+}
+function preguntar(ev, idx) {
+  ev?.preventDefault();
+  const sug = ['¿Cómo registro un radicado?', 'Subí un archivo y no aparece', '¿Cómo edito la capacidad de la subestación?', '¿Cómo funcionan los tiquets?'];
+  const q = (idx != null ? sug[idx] : $('#chatQ').value).trim(); if (!q) return;
+  ULTIMA_DUDA = q;
+  CHAT.push({ de: 'yo', html: esc(q) });
+  const r = responder(q);
+  const crear = '<a href="#" onclick="event.preventDefault();ticketForm(\'Duda\', ULTIMA_DUDA)">';
+  CHAT.push({ de: 'bot', html: r.length ? r.map(e => `<b>${e.t}</b><br>${e.a}`).join('<hr>') + `<div class="small muted" style="margin-top:6px">¿No era esto? ${crear}Crear un tiquet</a></div>`
+    : `No encontré una respuesta para eso. ${crear}Crea un tiquet</a> y un administrador lo revisará.` });
+  const box = $('#chatBox');
+  if (box) { box.innerHTML = chatHtml(); $('#chatLog').scrollTop = 1e6; $('#chatQ').focus(); } else render();
+}
+function abrirAyuda() {
+  $('#ayudaPanel')?.remove();
+  document.body.insertAdjacentHTML('beforeend', `<div id="ayudaPanel" class="ayuda-panel">
+    <div class="modal-head"><h2>Soporte</h2><div class="actions"><button class="btn sm" onclick="ticketForm()">+ Tiquet</button><button class="x" onclick="$('#ayudaPanel').remove()">×</button></div></div>
+    <div id="chatBox" class="card-pad">${chatHtml()}</div></div>`);
+  $('#chatLog').scrollTop = 1e6; $('#chatQ').focus();
+}
+
+let TK = null, fTk = 'abiertos';
+const TK_PILL = { Nuevo: 'info', Aceptado: 'acc', 'En desarrollo': 'warn', 'Listo para revisar': 'warn', Resuelto: 'ok', Rechazado: '' };
+async function cargarTickets() { TK = await api('GET', '/api/tickets'); }
+function vSoporte() {
+  const tab = ls.get('soporteTab') || 'tiquets';
+  const tabs = `<div class="tabs"><button class="${tab === 'tiquets' ? 'on' : ''}" onclick="ls.set('soporteTab','tiquets');render()">Tiquets</button><button class="${tab === 'asistente' ? 'on' : ''}" onclick="ls.set('soporteTab','asistente');render()">Asistente</button></div>`;
+  if (tab === 'asistente') return `${head('Soporte', 'Resuelve dudas sobre la plataforma o reporta mejoras y errores')}${tabs}<div class="card" style="max-width:780px"><div id="chatBox" class="card-pad">${chatHtml()}</div></div>`;
+  if (!TK) return `${head('Soporte')}${tabs}<div class="card card-pad muted">Cargando tiquets…</div>`;
+  const abiertos = ['Nuevo', 'Aceptado', 'En desarrollo', 'Listo para revisar'];
+  const lista = TK.tickets.filter(t => fTk === 'todos' ? true : fTk === 'mios' ? t.creado_por === USUARIO?.email
+    : fTk === 'abiertos' ? abiertos.includes(t.estado) : t.estado === fTk);
+  const cuenta = e => TK.tickets.filter(t => t.estado === e).length;
+  const admin = USUARIO?.rol === 'admin';
+  const sub = { Nuevo: admin ? 'esperan tu revisión' : 'en revisión', Aceptado: 'en cola para Claude', 'En desarrollo': 'Claude trabajando', 'Listo para revisar': admin ? 'verifica y cierra' : 'por verificar', Resuelto: 'cerrados' };
+  return `${head('Soporte', 'Tiquets de mejoras, errores y dudas. Un administrador los acepta y los aceptados pasan a la cola de Claude.', `<button class="btn primary" onclick="ticketForm()">+ Nuevo tiquet</button>`)}${tabs}
+  ${TK.ejecucion?.activo ? `<div class="note warn" style="margin-bottom:14px">⏳ Claude está trabajando en el tiquet #${TK.ejecucion.ticket_id} desde las ${esc(TK.ejecucion.inicio.slice(11, 16))}.</div>` : ''}
+  <div class="kpis">${Object.keys(sub).map(e => kpi(e, cuenta(e), sub[e], e === 'Nuevo' && cuenta(e) && admin ? 'warn' : '')).join('')}</div>
+  <div class="card"><div class="card-head"><div class="filters"><select onchange="fTk=this.value;render()">${[['abiertos', 'Abiertos'], ['mios', 'Mis tiquets'], ['todos', 'Todos'], ...TK.estados.map(e => [e, e])].map(([v, l]) => `<option value="${v}" ${fTk === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div><span class="muted small">${lista.length}</span></div>
+  ${lista.length ? `<div class="table-wrap"><table><thead><tr><th>#</th><th>Tiquet</th><th>Tipo</th><th>Prioridad</th><th>Estado</th><th>Creado por</th><th>Actualizado</th></tr></thead><tbody>
+    ${lista.map(t => `<tr class="click" onclick="verTicket(${t.id})"><td class="num muted">${t.id}</td><td><b>${esc(t.titulo)}</b>${t.pagina ? `<div class="muted small">${esc(t.pagina)}</div>` : ''}</td>
+      <td><span class="tag">${esc(t.tipo)}</span></td><td>${esc(t.prioridad)}</td><td><span class="pill ${TK_PILL[t.estado] || ''}">${esc(t.estado)}</span></td>
+      <td class="small">${esc(t.creado_por)}</td><td class="small muted">${esc((t.actualizado || '').replace('T', ' ').slice(0, 16))}</td></tr>`).join('')}
+  </tbody></table></div>` : '<div class="empty">No hay tiquets con este filtro.</div>'}</div>`;
+}
+vSoporte.after = async () => {
+  if (!TK && (ls.get('soporteTab') || 'tiquets') === 'tiquets') { await cargarTickets(); render(); return; }
+  if (TK?.ejecucion?.activo) vigilarEjecucion();
+};
+function ticketForm(tipo = 'Mejora', desc = '') {
+  const pagina = location.hash.replace('#/', '') || 'tablero';
+  modal('Nuevo tiquet', `<form id="tkf" class="form-grid">
+    <div class="full"><label>Título *</label><input name="titulo" required minlength="5" placeholder="Ej.: Poder filtrar los trámites por responsable"></div>
+    <div><label>Tipo</label><select name="tipo">${['Mejora', 'Error', 'Duda', 'Dato incorrecto'].map(x => `<option ${x === tipo ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
+    <div><label>Pantalla</label><input name="pagina" value="${esc(pagina)}"></div>
+    <div class="full"><label>Descripción</label><textarea name="descripcion" style="min-height:120px" placeholder="Qué pasa o qué necesitas, en qué proyecto o pantalla, y cómo debería funcionar">${esc(desc)}</textarea></div>
+    <div class="full"><label>Adjuntar archivos (opcional)</label>
+      <div class="adj-drop" tabindex="0" ondragover="event.preventDefault();this.classList.add('on')" ondragleave="this.classList.remove('on')"
+        ondrop="event.preventDefault();this.classList.remove('on');agregarArchivosNuevoTicket(event.dataTransfer.files)"
+        onpaste="pegarArchivoNuevoTicket(event)" onclick="event.target===this&&$('#tkfArchivo').click()">Arrastra un archivo, pega (Ctrl+V) una captura de pantalla, o <a href="#" onclick="event.preventDefault();$('#tkfArchivo').click()">elige un archivo</a> (PDF, KML, imágenes…, máx. 15 MB).
+        <input id="tkfArchivo" type="file" multiple style="display:none" onchange="agregarArchivosNuevoTicket(this.files);this.value=''"></div>
+      <ul id="tkfArchivosList" class="adjuntos-list"></ul>
+    </div>
+  </form>`, `<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn primary" onclick="guardarTicket()">Crear tiquet</button>`);
+  _tkfArchivos = [];
+}
+let _tkfArchivos = [];
+function agregarArchivosNuevoTicket(files) {
+  for (const file of files || []) {
+    if (file.size > MAX_ADJUNTO) { alert(`«${file.name}» supera el tamaño máximo permitido (15 MB)`); continue; }
+    _tkfArchivos.push(file);
+  }
+  renderArchivosNuevoTicket();
+}
+function pegarArchivoNuevoTicket(ev) {
+  const items = [...(ev.clipboardData?.items || [])].filter(i => i.kind === 'file');
+  if (!items.length) return;
+  ev.preventDefault();
+  const files = items.map((it, i) => { const f = it.getAsFile(); return f && new File([f], f.name || `captura-${Date.now()}-${i}.png`, { type: f.type }); }).filter(Boolean);
+  agregarArchivosNuevoTicket(files);
+}
+function quitarArchivoNuevoTicket(i) { _tkfArchivos.splice(i, 1); renderArchivosNuevoTicket(); }
+function renderArchivosNuevoTicket() {
+  const ul = $('#tkfArchivosList'); if (!ul) return;
+  ul.innerHTML = _tkfArchivos.map((f, i) => `<li>${iconoAdjunto(f.type)} ${esc(f.name)} <span class="muted small">${tamFmt(f.size)}</span>
+    <button type="button" class="x" title="Quitar" onclick="quitarArchivoNuevoTicket(${i})">×</button></li>`).join('');
+}
+async function guardarTicket() {
+  const f = $('#tkf'); if (!f.reportValidity()) return;
+  try {
+    const t = await api('POST', '/api/tickets', formData(f));
+    for (const file of _tkfArchivos) {
+      try { const datos = await leerArchivo(file); await api('POST', `/api/tickets/${t.id}/adjuntos`, { nombre: file.name, tipo: file.type, datos }); }
+      catch (e) { alert(`No se pudo adjuntar «${file.name}»: ${e.message}`); }
+    }
+    _tkfArchivos = []; closeModal(); $('#ayudaPanel')?.remove(); TK = null; toast(`Tiquet #${t.id} creado`);
+    if (location.hash.startsWith('#/soporte')) { await cargarTickets(); render(); }
+  } catch (e) { alert(e.message); }
+}
+function verTicket(id) {
+  const t = TK.tickets.find(x => x.id === id), admin = USUARIO?.rol === 'admin';
+  const accion = (estado, txt, cls = '') => `<button class="btn sm ${cls}" onclick="estadoTicket(${id}, '${estado}')">${txt}</button>`;
+  openDrawerId = null;
+  drawer(`<div class="modal-head"><div><div class="muted small">Tiquet #${t.id} · ${esc(t.tipo)} · creado por ${esc(t.creado_por)} el ${esc((t.creado || '').replace('T', ' ').slice(0, 16))}</div><h2>${esc(t.titulo)}</h2></div><button class="x" onclick="closeDrawer()">×</button></div>
+  <div class="drawer-body">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px"><span class="pill ${TK_PILL[t.estado] || ''}">${esc(t.estado)}</span><span class="tag">Prioridad ${esc(t.prioridad)}</span>${t.pagina ? `<a class="tag" href="#/${esc(t.pagina)}" onclick="closeDrawer()">pantalla: ${esc(t.pagina)}</a>` : ''}</div>
+    <p style="white-space:pre-wrap">${esc(t.descripcion) || '<span class="muted">Sin descripción.</span>'}</p>
+    ${admin ? `<div class="card card-pad" style="margin:14px 0"><h3 style="margin-bottom:8px">Acciones de administrador</h3>
+      <div class="form-grid"><div><label>Prioridad</label><select onchange="prioridadTicket(${id}, this.value)">${TK.prioridades.map(x => `<option ${x === t.prioridad ? 'selected' : ''}>${x}</option>`).join('')}</select></div>
+      <div class="full"><label>Nota para el equipo o para Claude (opcional)</label><input id="tkNota" placeholder="Ej.: hacerlo solo para proyectos activos"></div></div>
+      <div class="actions" style="margin-top:10px">
+        ${t.estado === 'Nuevo' ? ejecutarBtn(id, 'Aceptar y ejecutar con Claude') + accion('Aceptado', 'Solo aceptar') + accion('Rechazado', 'Rechazar', 'danger') : ''}
+        ${t.estado === 'Aceptado' ? ejecutarBtn(id, 'Ejecutar con Claude ahora') : ''}
+        ${t.estado === 'Listo para revisar' ? accion('Resuelto', 'Verificado: cerrar', 'primary') + accion('Aceptado', 'Devolver a Claude') : ''}
+        ${['Aceptado', 'En desarrollo'].includes(t.estado) && !trabajando(id) ? accion('Resuelto', 'Marcar resuelto') + accion('Rechazado', 'Cancelar', 'danger') : ''}
+        ${t.notas.some(n => /Ejecución de Claude/.test(n.texto)) ? `<button class="btn sm" onclick="verRegistro(${id})">Ver registro de Claude</button>` : ''}
+        ${['Resuelto', 'Rechazado'].includes(t.estado) ? accion('Nuevo', 'Reabrir') : ''}
+      </div>
+      ${trabajando(id) ? `<div class="note warn" style="margin-top:10px">⏳ Claude está trabajando en este tiquet desde las ${esc(TK.ejecucion.inicio.slice(11, 16))}. Puedes seguir usando la plataforma; esta vista se actualiza sola.</div>` : ''}
+      ${TK.claude_disponible === false ? '<div class="note warn" style="margin-top:10px">Claude Code no está instalado en el PC del servidor; la ejecución automática no está disponible.</div>' : ''}</div>`
+      : t.estado === 'Nuevo' ? '<div class="note" style="margin:14px 0">Pendiente de revisión por un administrador.</div>' : trabajando(id) ? '<div class="note warn" style="margin:14px 0">⏳ Claude está trabajando en este tiquet.</div>' : ''}
+    ${adjuntosHtml(t)}
+    <h3 style="margin:14px 0 8px">Historial y comentarios</h3>
+    ${t.notas.length ? `<ul class="timeline">${t.notas.map(n => `<li class="${/^Claude/.test(n.autor) ? 'resp' : /^Solicitud de subsanación/.test(n.texto) ? 'subsanacion' : ''}"><b>${esc(n.autor)}</b><div class="d">${esc((n.fecha || '').replace('T', ' ').slice(0, 16))}</div><div style="white-space:pre-wrap">${esc(n.texto)}</div></li>`).join('')}</ul>` : '<p class="muted">Sin comentarios.</p>'}
+    ${['Resuelto', 'Rechazado'].includes(t.estado) ? `<div class="note warn" style="margin-top:10px">Este tiquet está <b>${esc(t.estado.toLowerCase())}</b>. Si la solución quedó incompleta, solicita una subsanación: el comentario queda registrado y el tiquet vuelve a la cola para revisarlo de nuevo.</div>` : ''}
+    <form class="chat-in" style="margin-top:10px" onsubmit="event.preventDefault()">
+      <input id="tkCom" placeholder="${['Resuelto', 'Rechazado'].includes(t.estado) ? '¿Qué quedó incompleto o sin resolver?' : 'Agregar un comentario…'}">
+      <button class="btn" onclick="comentarTicket(event, ${id})">Comentar</button>
+      ${['Resuelto', 'Rechazado'].includes(t.estado) ? `<button class="btn primary" onclick="subsanarTicket(event, ${id})">Solicitar subsanación</button>` : ''}
+    </form>
+  </div>`);
+}
+const trabajando = id => !!(TK?.ejecucion?.activo && TK.ejecucion.ticket_id === id);
+const ejecutarBtn = (id, txt) => TK?.ejecucion?.activo
+  ? `<button class="btn sm" disabled title="Claude está ocupado con el tiquet #${TK.ejecucion.ticket_id}">${txt} (Claude ocupado)</button>`
+  : `<button class="btn sm primary" onclick="ejecutarClaude(${id})">${txt}</button>`;
+async function ejecutarClaude(id) {
+  if (!confirm('Claude implementará este tiquet ahora: hará una copia de la base, modificará el código del proyecto y lo dejará en «Listo para revisar». ¿Continuar?')) return;
+  try { await api('POST', `/api/tickets/${id}/ejecutar`); toast('Claude empezó a trabajar en el tiquet. Te aviso cuando termine; puedes seguir usando la plataforma.'); }
+  catch (e) { return alert(e.message); }
+  try { if (window.Notification && Notification.permission === 'default') Notification.requestPermission(); } catch { /* opcional */ }
+  _ultimoEstado = true; await cargarTickets(); render(); verTicket(id); vigilarEjecucion(); setTimeout(revisarTickets, 4000);
+}
+let _vigia = null;
+function vigilarEjecucion() {
+  clearTimeout(_vigia);
+  _vigia = setTimeout(async () => {
+    if (!location.hash.startsWith('#/soporte')) { await revisarTickets(); if (TK?.ejecucion?.activo) vigilarEjecucion(); return; }
+    const abierto = $('#drawer') && !$('#drawer').hidden ? +($('#drawer').innerText.match(/Tiquet #(\d+)/) || [])[1] : null;
+    const antes = TK?.ejecucion?.activo;
+    try { await cargarTickets(); } catch { return; }
+    if (antes && !TK.ejecucion.activo) avisoFin();
+    render(); if (abierto) verTicket(abierto);
+    if (TK.ejecucion?.activo) vigilarEjecucion();
+  }, 8000);
+}
+// aviso al terminar y contador de tiquets por revisar en el menú, desde cualquier pantalla
+let _ultimoEstado = null;
+function avisoFin() {
+  const e = TK.ejecucion, t = TK.tickets.find(x => x.id === e.ticket_id);
+  const msg = t?.estado === 'Listo para revisar' ? `✅ Claude terminó el tiquet #${e.ticket_id}: está listo para revisar` : `⚠️ La ejecución del tiquet #${e.ticket_id} terminó sin cerrarlo: revisa sus comentarios`;
+  const el = $('#toast'); el.innerHTML = `${esc(msg)} <a href="#/soporte" style="color:inherit;text-decoration:underline;margin-left:8px">Ver</a>`; el.hidden = false;
+  clearTimeout(toast._t); toast._t = setTimeout(() => el.hidden = true, 15000);
+  try { if (window.Notification && Notification.permission === 'granted') new Notification('Ruta Desarrollo de GD', { body: msg }); } catch { /* sin notificaciones */ }
+}
+async function revisarTickets() {
+  if (!USUARIO) return;
+  try { TK = await api('GET', '/api/tickets'); } catch { return; }
+  const activo = !!TK.ejecucion?.activo;
+  if (_ultimoEstado === true && !activo) avisoFin();
+  _ultimoEstado = activo;
+  const n = TK.tickets.filter(t => t.estado === 'Listo para revisar' || (USUARIO.rol === 'admin' && t.estado === 'Nuevo')).length;
+  const link = $('#nav a[data-r="soporte"]');
+  if (link) link.innerHTML = `<i>?</i>Soporte${activo ? ' <span class="nav-badge trabajando" title="Claude trabajando">⏳</span>' : n ? ` <span class="nav-badge" title="Tiquets por revisar">${n}</span>` : ''}`;
+}
+setInterval(revisarTickets, 20000);
+async function verRegistro(id) {
+  let r; try { r = await api('GET', `/api/tickets/${id}/registro`); } catch (e) { return alert(e.message); }
+  modal(`Registro de Claude · tiquet #${id}`, `<pre class="registro">${esc(r.registro || 'Aún no hay registro.')}</pre>`,
+    `<button class="btn" onclick="verRegistro(${id})">Actualizar</button><button class="btn primary" onclick="closeModal()">Cerrar</button>`, true);
+}
+async function estadoTicket(id, estado) {
+  const nota = $('#tkNota')?.value || '';
+  if (estado === 'Rechazado' && !nota && !confirm('¿Rechazar sin explicar el motivo? Puedes escribirlo en la nota.')) return;
+  await api('PUT', `/api/tickets/${id}`, { estado, nota_admin: nota }); await cargarTickets(); render(); verTicket(id); toast(`Tiquet #${id}: ${estado}`);
+}
+async function prioridadTicket(id, prioridad) { await api('PUT', `/api/tickets/${id}`, { prioridad }); await cargarTickets(); render(); verTicket(id); }
+async function comentarTicket(ev, id) {
+  ev.preventDefault(); const txt = $('#tkCom').value.trim(); if (!txt) return;
+  await api('POST', `/api/tickets/${id}/notas`, { texto: txt }); await cargarTickets(); render(); verTicket(id);
+}
+async function subsanarTicket(ev, id) {
+  ev.preventDefault(); const txt = $('#tkCom').value.trim();
+  if (!txt) return alert('Cuéntanos qué quedó incompleto para poder reabrir el tiquet.');
+  if (!confirm('El tiquet volverá al estado “Nuevo” para que se revise de nuevo. ¿Continuar?')) return;
+  try { await api('POST', `/api/tickets/${id}/subsanar`, { texto: txt }); }
+  catch (e) { return alert(e.message); }
+  await cargarTickets(); render(); verTicket(id); toast(`Tiquet #${id}: solicitud de subsanación enviada`);
+}
+
+// ------------------------------------------------------------ archivos adjuntos de un tiquet
+const MAX_ADJUNTO = 15 * 1024 * 1024; // 15 MB, igual que en el servidor
+const tamFmt = n => n == null ? '' : n < 1024 ? `${n} B` : n < 1024 * 1024 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1024 / 1024).toFixed(1)} MB`;
+const iconoAdjunto = tipo => tipo?.startsWith('image/') ? '🖼️' : tipo === 'application/pdf' ? '📄'
+  : /kml|xml|vnd\.google-earth/.test(tipo || '') ? '🗺️' : '📎';
+function adjuntosHtml(t) {
+  const puedeBorrar = a => USUARIO?.rol === 'admin' || a.autor === USUARIO?.email;
+  return `<div style="margin:14px 0">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <h3>Archivos adjuntos${t.adjuntos?.length ? ` (${t.adjuntos.length})` : ''}</h3>
+      <label class="btn sm" style="cursor:pointer">+ Adjuntar<input type="file" multiple style="display:none" onchange="subirArchivos(${t.id}, this.files);this.value=''"></label>
+    </div>
+    ${t.adjuntos?.length ? `<ul class="adjuntos-list">${t.adjuntos.map(a => `<li>
+      <a href="/api/tickets/${t.id}/adjuntos/${a.id}" target="_blank" rel="noopener">${iconoAdjunto(a.tipo)} ${esc(a.nombre)}</a>
+      <span class="muted small">${tamFmt(a.tamano)} · ${esc(a.autor)} · ${esc((a.fecha || '').replace('T', ' ').slice(0, 16))}</span>
+      ${puedeBorrar(a) ? `<button class="x" title="Eliminar adjunto" onclick="eliminarAdjunto(${t.id}, ${a.id})">×</button>` : ''}
+    </li>`).join('')}</ul>` : ''}
+    <div class="adj-drop" tabindex="0" ondragover="event.preventDefault();this.classList.add('on')" ondragleave="this.classList.remove('on')"
+      ondrop="event.preventDefault();this.classList.remove('on');subirArchivos(${t.id}, event.dataTransfer.files)"
+      onpaste="pegarAdjunto(event, ${t.id})">Arrastra un archivo aquí, o haz clic y pega (Ctrl+V) una captura de pantalla. También sirve para PDF, KML y otros documentos.</div>
+  </div>`;
+}
+function leerArchivo(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.onerror = () => rej(new Error(`No se pudo leer «${file.name}»`));
+    r.readAsDataURL(file);
+  });
+}
+async function subirArchivos(id, files) {
+  if (!files || !files.length) return;
+  for (const file of files) {
+    if (file.size > MAX_ADJUNTO) { alert(`«${file.name}» supera el tamaño máximo permitido (15 MB)`); continue; }
+    try {
+      const datos = await leerArchivo(file);
+      await api('POST', `/api/tickets/${id}/adjuntos`, { nombre: file.name, tipo: file.type, datos });
+    } catch (e) { alert(e.message); }
+  }
+  await cargarTickets(); render(); verTicket(id);
+}
+function pegarAdjunto(ev, id) {
+  const items = [...(ev.clipboardData?.items || [])].filter(i => i.kind === 'file');
+  if (!items.length) return;
+  ev.preventDefault();
+  const files = items.map((it, i) => { const f = it.getAsFile(); return f && new File([f], f.name || `captura-${Date.now()}-${i}.png`, { type: f.type }); }).filter(Boolean);
+  subirArchivos(id, files);
+}
+async function eliminarAdjunto(id, aid) {
+  if (!confirm('¿Eliminar este archivo adjunto?')) return;
+  try { await api('DELETE', `/api/tickets/${id}/adjuntos/${aid}`); } catch (e) { return alert(e.message); }
+  await cargarTickets(); render(); verTicket(id);
+}
+
+// ------------------------------------------------------------ subsanaciones del ECS (rondas de observaciones del OR)
+const esTramiteOR = t => !esEntregable(t) && ent(t.entidad_id).tipo === 'Operador de red';
+function rondasSubsanacion(t) {
+  const r = []; let cur = null;
+  for (const e of (EV[t.id] || [])) {
+    if (e.tipo === 'Observaciones del OR') { cur = { obs: e, sub: null }; r.push(cur); }
+    else if (e.tipo === 'Subsanación radicada' && cur && !cur.sub) cur.sub = e;
+  }
+  return r;
+}
+function subsanacionesHtml(t) {
+  if (!esTramiteOR(t)) return '';
+  const rs = rondasSubsanacion(t), abierta = rs.find(r => !r.sub);
+  const diasSolcor = rs.reduce((a, r) => a + habiles(r.obs.fecha, r.sub ? r.sub.fecha : HOY), 0);
+  return `<div class="card" style="margin-bottom:18px">
+    <div class="card-head"><div><h3>Subsanaciones</h3><div class="muted small">Cada ronda va desde que el OR envía observaciones hasta que Solcor radica la subsanación. Mientras tanto el plazo del OR queda suspendido. La aprobación final se registra como “Respuesta de la entidad”.</div></div>
+      ${abierta ? `<button class="btn sm primary" onclick="subsanacionForm(${t.id}, true)">Registrar subsanación radicada</button>` : `<button class="btn sm" onclick="subsanacionForm(${t.id}, false)">+ Nueva ronda de observaciones</button>`}</div>
+    ${rs.length ? `<div class="table-wrap"><table><thead><tr><th>Ronda</th><th>Observaciones del OR</th><th>Subsanación radicada</th><th class="r">Días hábiles de Solcor</th></tr></thead><tbody>
+      ${rs.map((r, i) => `<tr><td><b>${i + 1}</b>${r.obs.descripcion ? `<div class="muted small">${esc(r.obs.descripcion)}</div>` : ''}</td>
+        <td class="num">${fmtD(r.obs.fecha)}</td>
+        <td class="num">${r.sub ? fmtD(r.sub.fecha) + (r.sub.descripcion ? `<div class="muted small">${esc(r.sub.descripcion)}</div>` : '') : '<span class="pill warn">En curso</span>'}</td>
+        <td class="r num">${habiles(r.obs.fecha, r.sub ? r.sub.fecha : HOY)}</td></tr>`).join('')}
+      </tbody></table></div>
+      <div class="card-pad small muted" style="padding-top:8px">${rs.length} ronda${rs.length > 1 ? 's' : ''} · ${diasSolcor} días hábiles en subsanación · aprobación final: ${t.fecha_respuesta ? `<b>${fmtD(t.fecha_respuesta)}</b>` : 'pendiente'}</div>`
+      : '<div class="empty" style="padding:14px">Sin observaciones del OR registradas.</div>'}
+  </div>`;
+}
+function subsanacionForm(tid, cerrar) {
+  modal(cerrar ? 'Registrar subsanación radicada' : 'Nueva ronda de observaciones del OR', `<form id="sbf" class="form-grid">
+    ${cerrar ? '' : '<div><label>Fecha de las observaciones del OR *</label><input name="obs" type="date" required value="' + HOY + '"></div><div class="full"><label>Observaciones (resumen)</label><input name="obs_desc" placeholder="Ej.: ajustar diagrama unifilar y memoria de protecciones"></div>'}
+    <div><label>Fecha de radicación de la subsanación${cerrar ? ' *' : ' (si ya se radicó)'}</label><input name="sub" type="date" ${cerrar ? 'required value="' + HOY + '"' : ''}></div>
+    <div class="full"><label>Detalle de la subsanación</label><input name="sub_desc" placeholder="Ej.: se radicó la versión 2 del ECS"></div>
+  </form>`, `<button class="btn" onclick="closeModal()">Cancelar</button><button class="btn primary" onclick="guardarSubsanacion(${tid})">Guardar</button>`);
+}
+async function guardarSubsanacion(tid) {
+  const f = $('#sbf'); if (!f.reportValidity()) return;
+  const d = formData(f), t = S.tramites.find(x => x.id === tid), nuevos = [];
+  if (d.obs) nuevos.push(await api('POST', '/api/eventos', { tramite_id: tid, fecha: d.obs, tipo: 'Observaciones del OR', descripcion: d.obs_desc || '' }));
+  if (d.sub) {
+    if (d.obs && d.sub < d.obs) return alert('La subsanación no puede ser anterior a las observaciones');
+    nuevos.push(await api('POST', '/api/eventos', { tramite_id: tid, fecha: d.sub, tipo: 'Subsanación radicada', descripcion: d.sub_desc || '' }));
+  }
+  const evs = [...(EV[tid] || []), ...nuevos].sort((a, b) => a.fecha.localeCompare(b.fecha) || a.id - b.id);
+  await api('PUT', `/api/tramites/${tid}`, deriveFromEvents(t, evs));
+  closeModal(); await refresh(); toast('Subsanación registrada');
 }
 
 // ------------------------------------------------------------ datos
@@ -1271,6 +1734,8 @@ function projectForm(id = null, pre = {}) {
     <div><label>Fecha objetivo de RTB</label><input name="rtb_objetivo" type="date" value="${esc(p.rtb_objetivo)}"></div>
     <div><label>Presupuesto de desarrollo (COP)</label><input name="presupuesto" type="number" step="any" value="${esc(p.presupuesto)}"></div>
     <div><label>Circuito de conexión</label><input name="circuito" value="${esc(p.circuito)}" placeholder="se lee de los insumos del OR"></div>
+    <div><label>Subestación</label><input name="subestacion" value="${esc(p.subestacion)}"></div>
+    <div><label>Capacidad de la subestación (MVA)</label><input name="capacidad_se_mva" type="number" step="any" value="${esc(p.capacidad_se_mva)}"></div>
     <div><label>Etapa actual</label><select name="etapa">${ETAPAS_PROY.map(e => `<option ${p.etapa === e ? 'selected' : ''}>${e}</option>`).join('')}</select></div>
     <div><label>Estado</label><select name="estado">${ESTADOS_PROY.map(e => `<option ${p.estado === e ? 'selected' : ''}>${e}</option>`).join('')}</select></div>
     <div class="full"><label>Notas</label><textarea name="notas">${esc(p.notas)}</textarea></div>
@@ -1322,7 +1787,7 @@ async function ensureMunicipio(mun, dep) {
 async function saveProject(id) {
   const f = $('#pf'); if (!f.reportValidity()) return;
   const d = formData(f);
-  ['lat', 'lon', 'capacidad_kw', 'car_id', 'or_id', 'fecha_contrato', 'rtb_objetivo', 'presupuesto', 'circuito'].forEach(k => d[k] = nz(d[k]));
+  ['lat', 'lon', 'capacidad_kw', 'car_id', 'or_id', 'fecha_contrato', 'rtb_objetivo', 'presupuesto', 'circuito', 'subestacion', 'capacidad_se_mva'].forEach(k => d[k] = nz(d[k]));
   ['car_id', 'or_id'].forEach(k => d[k] = d[k] && +d[k]);
   try {
     d.mun_id = await ensureMunicipio(d.municipio, d.departamento);
@@ -1440,6 +1905,7 @@ function openTramite(id) {
       <div><span>Días de la entidad</span><b>${m.dias ?? '—'}</b></div>
       <div><span>Días suspendido</span><b>${m.susp || 0} (${m.nreq} req.)</b></div>
     </div>`}
+    ${subsanacionesHtml(t)}
     <div class="card card-pad" style="margin-bottom:18px">
       <h3 style="margin-bottom:10px">${en ? 'Registrar entrega' : 'Registrar evento'}</h3>
       <form id="ef" class="form-grid">
@@ -1499,7 +1965,7 @@ function deriveFromEvents(t, evs, extra = {}) {
   else {
     if (t.fecha_respuesta && !evs.some(esResp) && extra.removedResp) { u.fecha_respuesta = null; u.resultado = ''; }
     if (!t.fecha_respuesta || extra.removedResp) {
-      let open = false; evs.forEach(e => { if (e.tipo === 'Requerimiento de la entidad') open = true; if (e.tipo === 'Respuesta a requerimiento') open = false; });
+      let open = false; evs.forEach(e => { if (EV_ABRE.includes(e.tipo)) open = true; if (EV_CIERRA.includes(e.tipo)) open = false; });
       u.estado = fr ? (open ? 'Requerimiento' : 'Radicado') : 'Por radicar';
     }
   }
@@ -1607,12 +2073,12 @@ async function boot() {
   catch (e) { LOADED = false; $('#main').innerHTML = offline(e.message); return; }
   if (st.configurar) return pantallaAcceso(true);
   if (!st.usuario) return pantallaAcceso();
-  USUARIO = st.usuario; $('#authScreen')?.remove(); pintarUsuario();
+  USUARIO = st.usuario; $('#authScreen')?.remove(); pintarUsuario(); setTimeout(revisarTickets, 1500); $('#ayudaBtn').hidden = false;
   load().then(() => { LOADED = true; render(); })
     .catch(e => { LOADED = false; if (!$('#authScreen')) $('#main').innerHTML = offline(e.message); });
 }
 function pantallaAcceso(configurar = false) {
-  LOADED = false; USUARIO = null; closeModal(); closeDrawer();
+  LOADED = false; USUARIO = null; closeModal(); closeDrawer(); $('#ayudaBtn') && ($('#ayudaBtn').hidden = true); $('#ayudaPanel')?.remove();
   $('#authScreen')?.remove();
   document.body.insertAdjacentHTML('beforeend', `<div id="authScreen" class="auth-screen">
     <form class="auth-box" onsubmit="entrar(event, ${configurar})">

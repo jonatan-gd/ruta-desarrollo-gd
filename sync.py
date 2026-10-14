@@ -570,6 +570,10 @@ class Scanner:
                 if m:
                     data["circuito"] = m[1]
                 out.append(self._ev("@OR", "Radicado", d, src, p, folder, "Solicitud de insumos / disponibilidad" + extra, codigo="OR-DISP"))
+            elif re.search(r"observaci|subsanaci", strip_acc(fn), re.I):
+                tipo = "Subsanación radicada" if re.search(r"subsanaci", strip_acc(fn), re.I) else "Observaciones del OR"
+                d, src = self.file_date(p, folder)
+                out.append(self._ev("@OR", tipo, d, src, p, folder, os.path.splitext(fn)[0], codigo="OR-SOL"))
             elif re.search(r"aprob|concepto|viabilidad|fpo", fn, re.I):
                 # aprobacion del ECS por el OR: respuesta al ECS y, si aparece, la FPO asignada
                 txt = re.sub(r"\s+", " ", self.cache.text(p, 6))
@@ -605,6 +609,13 @@ class Scanner:
         for d in os.listdir(sdir):
             p = os.path.join(sdir, d)
             if not os.path.isdir(p):
+                continue
+            if re.search(r"observaci|subsanaci", strip_acc(d), re.I):
+                tipo = "Subsanación radicada" if re.search(r"subsanaci", strip_acc(d), re.I) else "Observaciones del OR"
+                fechas = sorted(x for x in (date_from_name(os.path.basename(f)) for f in walk_files(p)) if x)
+                fecha = date_from_name(d) or (fechas[0] if fechas else None)
+                if fecha:
+                    out.append(self._ev("@OR", tipo, fecha, "nombre", p, folder, d, codigo="OR-SOL"))
                 continue
             m = re.search(r"enviad[oa]s?\s+a\s+(.+)$", d, re.I)
             if m and self.or_in(m[1]):
@@ -816,9 +827,9 @@ def derive(con, tid):
     elif t["estado"] != "No aplica":
         open_ = False
         for e in evs:
-            if e["tipo"] == "Requerimiento de la entidad":
+            if e["tipo"] in ("Requerimiento de la entidad", "Observaciones del OR"):
                 open_ = True
-            elif e["tipo"] == "Respuesta a requerimiento":
+            elif e["tipo"] in ("Respuesta a requerimiento", "Subsanación radicada"):
                 open_ = False
         fr = u.get("fecha_radicado") or t["fecha_radicado"]
         u["estado"] = ("Requerimiento" if open_ else "Radicado") if fr else "Por radicar"

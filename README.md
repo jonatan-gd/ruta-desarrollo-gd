@@ -74,9 +74,15 @@ Prefactibilidad se supera con la firma del contrato. Desde ahí avanzan **en par
 | Calidad de datos (inconsistencias y faltantes) | Tablero |
 | Carta de insistencia (Word) y queja ante la SSPD cuando el OR no responde | Trámite vencido |
 | Responsable, fecha compromiso, Mis pendientes y resumen semanal | Mis pendientes |
-| Embudo E1 → E4, Standby, Descartados y causas de descarte | Embudo del pipeline |
+| Embudo E1 → E4, Descartados, causas de descarte y ubicación de carpetas | Embudo del pipeline |
 | Layout del predio sobre imagen satelital | Detalle del proyecto |
 | Costos de desarrollo (lee comprobantes de pago) y presupuesto | Detalle del proyecto |
+
+## Soporte y tiquets
+
+- Botón **?** (abajo a la derecha) y pestaña **Soporte**: asistente con respuestas sobre la plataforma y creación de tiquets (mejora, error, duda, dato incorrecto). Cualquier usuario con sesión puede crearlos y comentarlos.
+- Solo un **administrador** acepta, rechaza, prioriza o cierra. Flujo: Nuevo → Aceptado → En desarrollo → Listo para revisar → Resuelto (o Rechazado).
+- Los tiquets **Aceptados** son la cola de Claude: `python tickets_cli.py pendientes`. La tarea programada “Tiquets – Ruta Desarrollo de GD” los implementa, hace copia de la base antes de cada cambio y los deja en “Listo para revisar”; nunca los cierra.
 
 ## Paso a la nube (siguiente fase)
 
